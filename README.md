@@ -225,6 +225,27 @@ kimi stream ok model=kimi-k3 tools=11 7970ms
 anthropic passthrough model=claude-opus-5 200 13545ms
 ```
 
+## Remote Control (`/rc`) は併用できない
+
+bridge を通しているセッションでは Remote Control が使えない．`/rc` はコマンド一覧にも出ない．
+
+Claude Code は `ANTHROPIC_BASE_URL` が `api.anthropic.com` を指していないと Remote Control を無効にする．
+`_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` は**この判定にだけ意図的に適用されない**
+(本体が `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL does not apply to Remote Control.` と表示する)．
+環境変数による回避手段は無い．
+
+サブエージェントは親と同じプロセスで動くため，「親は Claude・サブだけ DeepSeek」という構成も
+Remote Control とは併用できない．用途で起動を分ける．
+
+| したいこと | 起動 |
+|---|---|
+| Remote Control を使う | `claude` |
+| DeepSeek / Kimi のサブエージェントを使う | `claude-ds` |
+
+VS Code 拡張から使う場合も同じ制約がかかる．拡張は `claudeCode.claudeProcessWrapper`
+(起動する実行ファイルのパス．`<ラッパ> <同梱 claude> <引数...>` の形で呼ばれる) を公開しているので
+拡張本体を改造せずに bridge を挟めるが，その設定を入れると Remote Control は使えなくなる．
+
 ## 制約
 
 - `cache_control` は対応概念が無いため無視する（プロバイダ自身の prefix cache は効く）．
