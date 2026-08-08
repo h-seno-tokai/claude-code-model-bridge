@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# bridge の起動を保証してから claude を起動する.
+# bridge が落ちている状態で ANTHROPIC_BASE_URL を向けると全通信が死ぬため,
+# health を確認できるまで claude を起動しない.
+set -euo pipefail
+
+# symlink 経由で呼ばれても実体のあるディレクトリを指す.
+DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+PORT="${BRIDGE_PORT:-8787}"
+HEALTH="http://127.0.0.1:${PORT}/__bridge/health"
+
+# API key の解決順: 既存の環境変数 -> .env -> ログインシェルの設定
+[ -f "$DIR/.env" ] && . "$DIR/.env"
+for var in DEEPSEEK_API_KEY KIMI_API_KEY; do
+  if [ -z "$(eval echo "\${$var:-}")" ] && [ -f "$HOME/.bashrc" ]; then
+    eval "$(grep -m1 "^export ${var}=" "$HOME/.bashrc" || true)"
+  fi
+  export "${var?}"
+done
+
+if [ -z "${DEEPSEEK_API_KEY:-}" ] && [ -z "${KIMI_API_KEY:-}" ]; then
+  echo "claude-ds: API key が 1 つも解決できない ($DIR/.env に書くか環境変数で渡す)" >&2
+  exit 1
+fi
+
+healthy() { wget -q -T 3 -O /dev/null "$HEALTH" 2>/dev/null; }
+listener() { ss -lptnH "sport = :${PORT}" 2>/dev/null | grep -oP 'pid=\K[0-9]+' | head -1; }
+
+start_bridge() {
+  nohup node "$DIR/proxy.mjs" >>"$DIR/bridge.out" 2>&1 &
+  for _ in $(seq 1 50); do
+    healthy && return 0
+    sleep 0.2
+  done
+  echo "claude-ds: bridge がポート ${PORT} で起動しない ($DIR/bridge.out を確認)" >&2
+  return 1
+}
+
+# proxy.mjs を編集したあとに反映させる用. claude は起動しない.
+# 旧プロセスが残ったまま新プロセスが EADDRINUSE で死ぬと, health は旧プロセスが返して
+# 「再起動できた」ように見える. そのためポートの解放を確認してから起動する.
+if [ "${1:-}" = "--bridge-restart" ]; then
+  for pid in $(listener) $(cat "$DIR/bridge.pid" 2>/dev/null); do
+    kill "$pid" 2>/dev/null || true
+  done
+  for _ in $(seq 1 50); do
+    [ -z "$(listener)" ] && break
+    sleep 0.2
+  done
+  if [ -n "$(listener)" ]; then
+    echo "claude-ds: ポート ${PORT} を解放できない (pid $(listener))" >&2
+    exit 1
+  fi
+  start_bridge || exit 1
+  echo "claude-ds: bridge を再起動した (pid $(listener))"
+  exit 0
+fi
+
+healthy || start_bridge || exit 1
+
+export ANTHROPIC_BASE_URL="http://127.0.0.1:${PORT}"
+# 任意の base URL を firstParty 扱いにさせる. これが無いと OAuth ログインが使われない.
+export _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1
+
+# /model のモデル一覧に 1 件だけ追加できる (選択自体は --model でも可能).
+export ANTHROPIC_CUSTOM_MODEL_OPTION="${ANTHROPIC_CUSTOM_MODEL_OPTION:-deepseek-v4-flash[1m]}"
+export ANTHROPIC_CUSTOM_MODEL_OPTION_NAME="${ANTHROPIC_CUSTOM_MODEL_OPTION_NAME:-DeepSeek V4 Flash}"
+export ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION="${ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION:-via local bridge}"
+
+exec claude "$@"
